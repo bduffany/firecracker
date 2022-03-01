@@ -13,8 +13,11 @@ class FilesystemFile:
     KNOWN_FILEFS_FORMATS = {'ext4'}
     path = None
 
-    def __init__(self, path: str, size: int = 256, fs_format: str = 'ext4'):
+    def __init__(self, path: str, size: int = 256, fs_format: str = 'ext4', root_directory: str = None):
         """Create a new file system in a file.
+
+        A root directory specifying the files for the drive can optionally
+        be specified.
 
         Raises if the file system format is not supported, if the file already
         exists, or if it ends in '/'.
@@ -33,7 +36,10 @@ class FilesystemFile:
             'dd status=none if=/dev/zero'
             '    of=' + path +
             '    bs=1M count=' + str(size))
-        utils.run_cmd('mkfs.ext4 -qF ' + path)
+        utils.run_cmd(
+            'mkfs.ext4'
+            '    -qF ' + path
+            + ('   -d '+root_directory if root_directory else ''))
         self.path = path
 
     def resize(self, new_size):

@@ -4,8 +4,10 @@
 
 import os
 import platform
+import tempfile
 
 from framework import utils
+from framework.microvm import Microvm
 
 import host_tools.drive as drive_tools
 import host_tools.network as net_tools  # pylint: disable=import-error
@@ -334,6 +336,18 @@ def test_patch_drive(test_microvm_with_api, network_config):
 
     test_microvm.start()
 
+    ssh_connection = net_tools.SSHConnection(test_microvm.ssh_config)
+
+    # Mount the drive
+    exit_code, _, stderr = ssh_connection.execute_command(
+        "mkdir -p /scratch && mount /dev/vdb /scratch")
+    assert exit_code == 0
+    assert stderr.read() == ''
+    # Unmount the drive
+    exit_code, _, stderr = ssh_connection.execute_command("umount /dev/vdb")
+    assert exit_code == 0
+    assert stderr.read() == ''
+
     # Updates to `path_on_host` with a valid path are allowed.
     fs2 = drive_tools.FilesystemFile(
         os.path.join(test_microvm.fsfiles, 'otherscratch'), size=512
@@ -344,8 +358,6 @@ def test_patch_drive(test_microvm_with_api, network_config):
     )
     assert test_microvm.api_session.is_status_no_content(response.status_code)
 
-    ssh_connection = net_tools.SSHConnection(test_microvm.ssh_config)
-
     # The `lsblk` command should output 2 lines to STDOUT: "SIZE" and the size
     # of the device, in bytes.
     blksize_cmd = "lsblk -b /dev/vdb --output SIZE"
@@ -354,6 +366,92 @@ def test_patch_drive(test_microvm_with_api, network_config):
     assert stderr.read() == ''
     stdout.readline()  # skip "SIZE"
     assert stdout.readline().strip() == size_bytes_str
+
+
+def test_patch_drive_with_new_contents(test_microvm_with_api: Microvm, network_config):
+    """
+    Test replacing the backing filesystem after guest boot works,
+    where the replaced drive has new contents.
+
+    @type: functional
+    """
+    test_microvm = test_microvm_with_api
+    test_microvm.jailer.daemonize = False
+    test_microvm.spawn()
+
+    # Set up the microVM with 1 vCPUs, 256 MiB of RAM, 1 network iface, a console,
+    # a root file system with rw permission, and a scratch drive.
+    test_microvm.basic_config(
+        vcpu_count=1,
+        boot_args='console=ttyS0 reboot=k panic=1 pci=off'
+    )
+
+    _tap, _, _ = test_microvm.ssh_network_config(network_config, '1')
+
+    with tempfile.TemporaryDirectory() as root_directory:
+        with open(os.path.join(root_directory, 'foo.txt'), 'w') as f:
+            f.write('foo')
+
+        fs1 = drive_tools.FilesystemFile(
+            os.path.join(test_microvm.fsfiles, 'scratch'),
+            root_directory=root_directory
+        )
+
+    test_microvm.add_drive(
+        'scratch',
+        fs1.path
+    )
+
+    test_microvm.start()
+
+    ssh_connection = net_tools.SSHConnection(test_microvm.ssh_config)
+
+    exit_code, _, stderr = ssh_connection.execute_command(
+        'mkdir -p /mnt/scratch && '
+        'mount /dev/vdb /mnt/scratch'
+    )
+    assert stderr.read() == ''
+    assert exit_code == 0
+
+    _, stdout, stderr = ssh_connection.execute_command('cat /mnt/scratch/foo.txt')
+    assert stderr.read() == ''
+    assert stdout.read() == 'foo'
+
+    # Unmount the drive before patching
+    exit_code, _, stderr = ssh_connection.execute_command('umount /dev/vdb')
+    assert stderr.read() == ''
+    assert exit_code == 0
+
+    with tempfile.TemporaryDirectory() as root_directory:
+        with open(os.path.join(root_directory, 'bar.txt'), 'w') as f:
+            f.write('bar')
+
+        fs2 = drive_tools.FilesystemFile(
+            os.path.join(test_microvm.fsfiles, 'otherscratch'),
+            root_directory=root_directory
+        )
+
+    response = test_microvm.drive.patch(
+        drive_id='scratch',
+        path_on_host=test_microvm.create_jailed_resource(fs2.path)
+    )
+    assert test_microvm.api_session.is_status_no_content(response.status_code)
+
+    print('Firecracker logs:')
+    print(test_microvm.log_data)
+    print('Screen logs:')
+    with open(test_microvm.screen_log, 'r') as f:
+        print(f.read())
+
+    # Remount the patched disk.
+    # >>> This gets stuck!
+    exit_code, _, stderr = ssh_connection.execute_command('mount /dev/vdb /mnt/scratch')
+    assert stderr.read() == ''
+    assert exit_code == 0
+
+    _, stdout, stderr = ssh_connection.execute_command('cat /mnt/scratch/bar.txt')
+    assert stderr.read() == ''
+    assert stdout.read() == 'bar'
 
 
 def test_no_flush(test_microvm_with_api, network_config):
